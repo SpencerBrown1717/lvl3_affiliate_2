@@ -1,6 +1,6 @@
 # LVL3.ai Sales Portal
 
-A full-stack web application for LVL3.ai affiliates to generate and manage sales links with Firebase backend integration.
+A full-stack web application for LVL3.ai affiliates to generate and manage sales links with Firebase backend integration. The portal allows users to earn $5 per signup with a maximum of 500 signups ($2,500 maximum earnings).
 
 ## Features
 
@@ -168,9 +168,6 @@ vercel --prod
 
 The application is deployed at: [https://lvl3-sales-portal.windsurf.build](https://lvl3-sales-portal.windsurf.build)
 
-## License
-
-MIT License
 
 ## About
 

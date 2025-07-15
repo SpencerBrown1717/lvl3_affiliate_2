@@ -11,11 +11,38 @@ import {
   where,
   query,
   serverTimestamp,
-  increment
+  increment,
+  runTransaction,
+  limit,
+  getCountFromServer
 } from 'firebase/firestore';
 import { db, isFirebaseInitialized } from './firebase.js';
+import { SALES_CONFIG, ERROR_MESSAGES, APP_SETTINGS } from './config.js';
 
-// Generate a new sales link for a user
+// Helper function to open IndexedDB for offline storage
+const openOfflineDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('lvl3-offline-db', 1);
+    
+    request.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('offlineClicks')) {
+        db.createObjectStore('offlineClicks', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('offlineShares')) {
+        db.createObjectStore('offlineShares', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('offlineLinks')) {
+        db.createObjectStore('offlineLinks', { keyPath: 'id' });
+      }
+    };
+    
+    request.onsuccess = e => resolve(e.target.result);
+    request.onerror = e => reject(e.target.error);
+  });
+};
+
+// Generate a new sales link for a user with robust error handling and signup limits
 export const generateSalesLink = async (userId) => {
   // Check if Firebase is initialized
   if (!isFirebaseInitialized()) {
@@ -30,7 +57,9 @@ export const generateSalesLink = async (userId) => {
       url: fullLink,
       createdAt: new Date().toISOString(),
       clicks: 0,
-      conversions: 0
+      conversions: 0,
+      maxSignups: SALES_CONFIG.MAX_SIGNUPS_PER_AFFILIATE,
+      payoutPerSignup: SALES_CONFIG.PAYOUT_PER_SIGNUP
     };
     
     return { 
@@ -41,35 +70,79 @@ export const generateSalesLink = async (userId) => {
   }
 
   try {
+    // Check if global signup limit has been reached
+    const signupsQuery = query(collection(db, 'conversions'), limit(SALES_CONFIG.GLOBAL_MAX_SIGNUPS + 1));
+    const signupsSnapshot = await getCountFromServer(signupsQuery);
+    const globalSignupCount = signupsSnapshot.data().count;
+    
+    if (globalSignupCount >= SALES_CONFIG.GLOBAL_MAX_SIGNUPS) {
+      return {
+        success: false,
+        error: ERROR_MESSAGES['signup/global-limit-reached']
+      };
+    }
+    
     // Generate a unique ID for the link
     const linkId = uuidv4().substring(0, 8);
     const baseUrl = window.location.origin;
     const fullLink = `${baseUrl}?ref=${linkId}`;
     
-    // Add link to user document
-    const userRef = doc(db, 'users', userId);
-    const newLink = {
-      id: linkId,
-      url: fullLink,
-      createdAt: serverTimestamp(),
-      clicks: 0,
-      conversions: 0
-    };
+    // Use transaction to ensure atomic operations
+    return await runTransaction(db, async (transaction) => {
+      // Get user document in transaction
+      const userRef = doc(db, 'users', userId);
+      const userDoc = await transaction.get(userRef);
+      
+      if (!userDoc.exists()) {
+        throw new Error('User not found');
+      }
+      
+      const userData = userDoc.data();
+      
+      // Check if user has reached their link limit
+      const userLinks = userData.salesLinks || [];
+      const userConversions = userData.conversions || 0;
+      
+      if (userConversions >= SALES_CONFIG.MAX_SIGNUPS_PER_AFFILIATE) {
+        throw new Error(ERROR_MESSAGES['signup/limit-reached']);
+      }
+      
+      const newLink = {
+        id: linkId,
+        url: fullLink,
+        createdAt: serverTimestamp(),
+        clicks: 0,
+        conversions: 0,
+        maxSignups: SALES_CONFIG.MAX_SIGNUPS_PER_AFFILIATE,
+        payoutPerSignup: SALES_CONFIG.PAYOUT_PER_SIGNUP
+      };
+      
+      // Create the link document in the transaction
+      const linkRef = doc(db, 'links', linkId);
+      transaction.set(linkRef, {
+        ...newLink,
+        userId
+      });
+      
+      // Update the user's links array atomically
+      transaction.update(userRef, {
+        salesLinks: arrayUnion({
+          id: linkId,
+          url: fullLink,
+          createdAt: new Date().toISOString(),
+          clicks: 0,
+          conversions: 0
+        })
+      });
     
-    await updateDoc(userRef, {
-      salesLinks: arrayUnion(newLink)
+      return { 
+        success: true, 
+        link: {
+          ...newLink,
+          createdAt: new Date().toISOString() // Convert server timestamp to ISO string for immediate display
+        }
+      };
     });
-    
-    // Also create a separate document for tracking
-    await setDoc(doc(db, 'links', linkId), {
-      userId,
-      url: fullLink,
-      createdAt: serverTimestamp(),
-      clicks: 0,
-      conversions: 0
-    });
-    
-    return { success: true, link: newLink };
   } catch (error) {
     console.error('Error generating sales link:', error.message);
     return { success: false, error: error.message };
@@ -152,7 +225,7 @@ export const trackLinkClick = async (linkId) => {
     
     return { success: false, error: 'Link not found' };
   } catch (error) {
-    console.error('Error tracking link click:', error.message);
+    console.error('Error tracking link click:', error);
     return { success: false, error: error.message };
   }
 };
