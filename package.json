@@ -1,0 +1,22 @@
+{
+  "name": "lvl3-sales-portal",
+  "version": "1.0.0",
+  "description": "Sales portal for LVL3.ai affiliates",
+  "main": "index.html",
+  "scripts": {
+    "dev": "serve",
+    "build": "echo 'No build step required'",
+    "start": "serve"
+  },
+  "keywords": [
+    "sales",
+    "affiliate",
+    "portal",
+    "lvl3"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "serve": "^14.0.1"
+  }
+}
