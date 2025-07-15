@@ -4,12 +4,23 @@
     {
       "src": "*.html",
       "use": "@vercel/static"
+    },
+    {
+      "src": "*.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
+      "src": "/(.+\\.js)",
+      "dest": "/$1"
+    },
+    {
       "src": "/(.*)",
       "dest": "/index.html"
     }
-  ]
+  ],
+  "github": {
+    "silent": true
+  }
 }

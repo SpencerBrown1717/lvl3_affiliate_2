@@ -542,24 +542,128 @@
 <body>
   <div id="root"></div>
 
+  <!-- Firebase SDK (Modular) -->
+  <script type="module">
+    // Import Firebase modules
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js';
+    import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js';
+    import { getFirestore, doc, setDoc, getDoc, updateDoc, arrayUnion, collection, query, where, getDocs, serverTimestamp, increment } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js';
+    
+    // Import local config (will be an empty object if not configured)
+    let firebaseConfig;
+    try {
+      const configModule = await import('./firebase.config.js');
+      firebaseConfig = configModule.firebaseConfig;
+    } catch (error) {
+      console.warn('Firebase config not found or invalid, using mock mode');
+      firebaseConfig = {
+        apiKey: "DEMO_API_KEY",
+        projectId: "demo-project-id"
+      };
+    }
+    
+    // Initialize Firebase with defensive coding
+    let app, auth, db;
+    let firebaseInitialized = false;
+    
+    try {
+      // Check if we have valid config
+      if (
+        firebaseConfig && 
+        firebaseConfig.apiKey && 
+        firebaseConfig.apiKey !== "YOUR_API_KEY" && 
+        firebaseConfig.projectId && 
+        firebaseConfig.projectId !== "your-project-id"
+      ) {
+        app = initializeApp(firebaseConfig);
+        auth = getAuth(app);
+        db = getFirestore(app);
+        firebaseInitialized = true;
+        console.log("Firebase initialized successfully");
+      } else {
+        console.log("Firebase initialization skipped: Valid configuration not found");
+        // Create mock objects for a graceful experience
+        auth = { currentUser: null };
+      }
+    } catch (error) {
+      console.error("Firebase initialization error:", error);
+      auth = { currentUser: null };
+    }
+    
+    // Make Firebase accessible to the global script
+    window.firebase = {
+      auth,
+      db,
+      initialized: firebaseInitialized
+    };
+  </script>
+
   <script>
-    // Global variables
-    let currentStep = 'signup';
-    let email = '';
+    // Global state
+    let currentStep = 'signup';  // 'signup' or 'dashboard'
     let salesPersonName = '';
+    let email = '';
     let salesLink = '';
+    let notifications = [];
+    let currentUser = null;
+    
+    // Constants
+    const payoutPerSignup = 500;  // $500 per confirmed signup
+    const maxSignups = 50;        // Max 50 signups allowed
+    
+    // Default stats (will be replaced with real data)
     let stats = {
       totalShares: 0,
       pendingSignups: 0,
       confirmedSignups: 0,
       totalEarnings: 0,
-      remainingSlots: 500
+      remainingSlots: maxSignups
     };
-    let notifications = [];
+    
+    // Check if user is already logged in
+    function checkAuthState() {
+      if (window.firebase && window.firebase.initialized) {
+        onAuthStateChanged(window.firebase.auth, (user) => {
+          if (user) {
+            // User is signed in
+            currentUser = user;
+            email = user.email;
+            salesPersonName = email.split('@')[0];
+            currentStep = 'dashboard';
+            loadUserData(user.uid);
+          }
+          render();
+        });
+      }
+    }
 
-    const maxSignups = 500;
-    const payoutPerSignup = 5;
-    const maxEarnings = maxSignups * payoutPerSignup;
+    // Load user data from Firestore
+    async function loadUserData(uid) {
+      try {
+        const userRef = doc(window.firebase.db, 'users', uid);
+        const userDoc = await getDoc(userRef);
+        
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          stats = userData.stats;
+          salesLink = userData.salesLink;
+        }
+      } catch (error) {
+        console.error('Error loading user data:', error);
+      }
+    }
+
+    // Logout function
+    async function logout() {
+      try {
+        await signOut(window.firebase.auth);
+        currentUser = null;
+        currentStep = 'signup';
+        render();
+      } catch (error) {
+        console.error('Error signing out:', error);
+      }
+    }
 
     // Helper functions
     function generateSalesLink(addr) {
@@ -631,28 +735,44 @@
       }, 1500);
     }
 
-    function copyLink() {
-      if (navigator.clipboard && window.isSecureContext) {
-        navigator.clipboard.writeText(salesLink);
-        showNotification('success', 'Sales link copied to clipboard!');
-      } else {
-        // Fallback for older browsers or non-HTTPS
-        const textArea = document.createElement('textarea');
-        textArea.value = salesLink;
-        textArea.style.position = 'fixed';
-        textArea.style.left = '-999999px';
-        textArea.style.top = '-999999px';
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
+    // Copy sales link to clipboard
+    async function copyLink() {
+      const tempInput = document.createElement('input');
+      tempInput.value = salesLink;
+      document.body.appendChild(tempInput);
+      tempInput.select();
+      document.execCommand('copy');
+      document.body.removeChild(tempInput);
+      
+      showNotification('success', 'Sales link copied to clipboard!');
+      
+      // If Firebase is initialized, track this share
+      if (window.firebase && window.firebase.initialized && currentUser) {
         try {
-          document.execCommand('copy');
-          showNotification('success', 'Sales link copied to clipboard!');
-        } catch (err) {
-          showNotification('error', 'Failed to copy link. Please copy manually.');
+          // Get the link ID from the URL
+          const url = new URL(salesLink);
+          const linkId = url.searchParams.get('ref');
+          
+          if (linkId) {
+            // Update the link tracking document
+            const linkRef = doc(window.firebase.db, 'links', linkId);
+            const linkDoc = await getDoc(linkRef);
+            
+            if (linkDoc.exists()) {
+              await updateDoc(linkRef, {
+                shares: increment(1),
+                lastSharedAt: serverTimestamp()
+              });
+            }
+          }
+        } catch (error) {
+          console.error('Error tracking share:', error);
         }
-        document.body.removeChild(textArea);
       }
+      
+      // Update UI stats
+      stats.totalShares++;
+      render();
     }
 
     function renderSignup() {
@@ -683,7 +803,7 @@
                   </h2>
                   <p class="text-gray-300 text-xl leading-relaxed">
                     Get your personal sales link and earn up to
-                    <span class="text-green-400 font-bold text-3xl"> $${maxEarnings.toLocaleString()}</span>
+                    <span class="text-green-400 font-bold text-3xl"> $${maxSignups * payoutPerSignup.toLocaleString()}</span>
                   </p>
                 </div>
 
@@ -703,7 +823,7 @@
                     </div>
                     <div class="commission-card highlight">
                       <span class="text-white font-semibold text-xl">Maximum earnings</span>
-                      <span class="text-green-400 font-bold text-3xl">$${maxEarnings.toLocaleString()}</span>
+                      <span class="text-green-400 font-bold text-3xl">$${maxSignups * payoutPerSignup.toLocaleString()}</span>
                     </div>
                   </div>
                 </div>
@@ -726,7 +846,7 @@
                     </div>
                     <div class="feature-item">
                       <div class="feature-dot"></div>
-                      <span class="text-base text-gray-200">Earn $5 for each user who stays active for 3+ months</span>
+                      <span class="text-base text-gray-200">Earn $${payoutPerSignup} for each user who stays active for 3+ months</span>
                     </div>
                   </div>
                 </div>
@@ -759,182 +879,124 @@
     }
 
     function renderDashboard() {
-      const progressPct = ((maxSignups - stats.remainingSlots) / maxSignups) * 100;
-      const earningsPct = (stats.totalEarnings / maxEarnings) * 100;
-
       return `
-        <!-- header -->
-        <div class="glass-effect" style="border-bottom: 1px solid rgba(148, 163, 184, 0.15);">
-          <div class="container py-8">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center">
-                <div class="logo">
-                  <div class="logo-bar logo-bar-1"></div>
-                  <div class="logo-bar logo-bar-2"></div>
-                  <div class="logo-bar logo-bar-3"></div>
-                </div>
-                <div style="margin-left: 20px;">
-                  <h1 class="text-3xl font-bold text-white">LVL3.ai Sales Portal</h1>
-                  <p class="text-base text-gray-400">Sales Team Dashboard</p>
-                </div>
-              </div>
-              <div class="header-badge">
-                <span class="text-base text-gray-300 font-medium">Welcome, ${salesPersonName}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="container py-10">
-          <!-- earnings overview -->
-          <div class="card" style="background: linear-gradient(135deg, rgba(5, 150, 105, 0.18) 0%, rgba(16, 185, 129, 0.18) 50%, rgba(5, 150, 105, 0.18) 100%); border-color: rgba(16, 185, 129, 0.35);">
-            <div class="flex items-center justify-between mb-8">
-              <h2 class="text-4xl font-bold text-white">Earnings Progress</h2>
-              <span class="text-4xl pulse">🏆</span>
-            </div>
-            <div class="grid grid-3 gap-10">
-              <div class="text-center">
-                <p class="text-5xl font-bold text-green-400 mb-4">$${stats.totalEarnings.toLocaleString()}</p>
-                <p class="text-gray-400 font-medium text-lg">Current Earnings</p>
-                <div class="progress-bar mt-6">
-                  <div class="progress-fill" style="width: ${earningsPct}%"></div>
-                </div>
-              </div>
-              <div class="text-center">
-                <p class="text-5xl font-bold text-purple-400 mb-4">${stats.confirmedSignups}</p>
-                <p class="text-gray-400 font-medium text-lg">Confirmed Signups</p>
-                <div class="progress-bar mt-6">
-                  <div class="progress-fill purple" style="width: ${progressPct}%"></div>
-                </div>
-              </div>
-              <div class="text-center">
-                <p class="text-5xl font-bold text-white mb-4">${stats.remainingSlots.toLocaleString()}</p>
-                <p class="text-gray-400 font-medium text-lg">Remaining Slots</p>
-                <p class="text-base text-green-400 mt-4 font-medium">
-                  Worth $${(stats.remainingSlots * payoutPerSignup).toLocaleString()}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <!-- stats grid -->
-          <div class="grid grid-4 gap-8 mb-10">
-            <div class="stat-card info-border">
-              <div class="flex items-center justify-between">
-                <div>
-                  <p class="text-base text-gray-400 font-medium">Link Shares</p>
-                  <p class="text-4xl font-bold text-blue-400">${stats.totalShares.toLocaleString()}</p>
-                </div>
-                <span class="text-4xl">🔗</span>
-              </div>
-            </div>
-            <div class="stat-card warning-border">
-              <div class="flex items-center justify-between">
-                <div>
-                  <p class="text-base text-gray-400 font-medium">Pending (3mo)</p>
-                  <p class="text-4xl font-bold text-amber-400">${stats.pendingSignups}</p>
-                </div>
-                <span class="text-4xl">⏰</span>
-              </div>
-            </div>
-            <div class="stat-card success-border">
-              <div class="flex items-center justify-between">
-                <div>
-                  <p class="text-base text-gray-400 font-medium">Conversion Rate</p>
-                  <p class="text-4xl font-bold text-green-400">${
-                    stats.totalShares > 0
-                      ? Math.round(((stats.confirmedSignups + stats.pendingSignups) / stats.totalShares) * 100)
-                      : 0
-                  }%</p>
-                </div>
-                <span class="text-4xl">📈</span>
-              </div>
-            </div>
-            <div class="stat-card accent-border">
-              <div class="flex items-center justify-between">
-                <div>
-                  <p class="text-base text-gray-400 font-medium">Potential Value</p>
-                  <p class="text-4xl font-bold text-purple-400">$${maxEarnings.toLocaleString()}</p>
-                </div>
-                <span class="text-4xl">🎯</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- main two-col -->
-          <div class="grid grid-2 gap-10">
-            <!-- left — link / templates -->
-            <div class="card">
-              <h2 class="text-3xl font-semibold text-white mb-8 flex items-center">
-                🔗 Your Personal Sales Link
+        <!-- Dashboard screen -->
+        <div class="flex flex-col py-12 px-4 sm:px-6 lg:px-8">
+          <!-- Header -->
+          <div class="flex justify-between items-center mb-8">
+            <div>
+              <h2 class="text-4xl font-extrabold">
+                <span class="bg-gradient-text">LVL3.ai</span> Sales Portal
               </h2>
-              <div class="flex gap-4 mb-8">
-                <input
-                  type="text"
-                  value="${salesLink}"
-                  readonly
-                  class="input"
-                  style="font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace; font-size: 14px;"
-                />
-                <button
-                  onclick="copyLink()"
-                  class="button"
-                  style="padding: 20px;"
-                >
-                  📋
+              <p class="mt-2 text-lg text-gray-400">Welcome, ${salesPersonName}!</p>
+            </div>
+            <button onclick="logout()" class="button-outline">
+              Logout
+            </button>
+          </div>
+          
+          <!-- Stats overview -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mt-8">
+            <!-- Stat card: Total shares -->
+            <div class="bg-gray-800 bg-opacity-50 p-6 rounded-xl">
+              <div class="flex flex-col">
+                <div class="text-gray-400 text-sm uppercase tracking-wider font-medium mb-1">Total Shares</div>
+                <div class="text-3xl font-bold">${stats.totalShares}</div>
+                <div class="text-xs text-green-400 mt-2">+1 in the last 24h</div>
+              </div>
+            </div>
+            
+            <!-- Stat card: Pending Signups -->
+            <div class="bg-gray-800 bg-opacity-50 p-6 rounded-xl">
+              <div class="flex flex-col">
+                <div class="text-gray-400 text-sm uppercase tracking-wider font-medium mb-1">Pending Signups</div>
+                <div class="text-3xl font-bold">${stats.pendingSignups}</div>
+                <div class="text-xs text-blue-400 mt-2">Avg conversion: 20%</div>
+              </div>
+            </div>
+            
+            <!-- Stat card: Confirmed Signups -->
+            <div class="bg-gray-800 bg-opacity-50 p-6 rounded-xl">
+              <div class="flex flex-col">
+                <div class="text-gray-400 text-sm uppercase tracking-wider font-medium mb-1">Confirmed Signups</div>
+                <div class="text-3xl font-bold">${stats.confirmedSignups}</div>
+                <div class="text-xs text-purple-400 mt-2">Commission: $${payoutPerSignup} each</div>
+              </div>
+            </div>
+            
+            <!-- Stat card: Total Earnings -->
+            <div class="bg-gray-800 bg-opacity-50 p-6 rounded-xl">
+              <div class="flex flex-col">
+                <div class="text-gray-400 text-sm uppercase tracking-wider font-medium mb-1">Total Earnings</div>
+                <div class="text-3xl font-bold">$${stats.totalEarnings}</div>
+                <div class="text-xs text-amber-400 mt-2">${stats.remainingSlots} slots remaining</div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Sales link section -->
+          <div class="mt-10 bg-gradient p-1 rounded-xl shadow-glow">
+            <div class="bg-gray-900 p-8 rounded-lg">
+              <div class="flex justify-between items-center mb-6">
+                <h3 class="text-xl font-bold">Your Sales Link</h3>
+                <div class="badge">${window.firebase && window.firebase.initialized ? 'Active' : 'Demo Mode'}</div>
+              </div>
+              
+              <div class="flex flex-col sm:flex-row sm:items-center gap-4">
+                <div class="flex-grow p-3 bg-gray-800 rounded-lg overflow-x-auto whitespace-nowrap">
+                  <code class="text-green-400">${salesLink}</code>
+                </div>
+                <button onclick="copyLink()" class="button-primary sm:flex-shrink-0">
+                  <div class="flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path>
+                    </svg>
+                    Copy Link
+                  </div>
                 </button>
               </div>
-              <div style="display: flex; flex-direction: column; gap: 20px;">
-                <div class="template-card purple">
-                  <p class="text-purple-300 font-medium mb-3 text-lg">📧 Email Template:</p>
-                  <p class="text-gray-200 leading-relaxed">"Get early access to LVL3.ai – revolutionary AI that thinks faster than you can ask: ${salesLink}"</p>
-                </div>
-                <div class="template-card blue">
-                  <p class="text-blue-300 font-medium mb-3 text-lg">💬 Social Share:</p>
-                  <p class="text-gray-200 leading-relaxed">"Exclusive early access to next-gen AI technology. Limited spots available: ${salesLink}"</p>
+              
+              <div class="mt-6 text-sm text-gray-400">
+                <p>Share this link with potential customers. You'll earn $${payoutPerSignup} for each confirmed signup.</p>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Performance chart placeholder -->
+          <div class="mt-10 p-8 bg-gray-800 bg-opacity-50 rounded-xl">
+            <h3 class="text-xl font-bold mb-6">Performance Overview</h3>
+            
+            <!-- Placeholder for chart (in a real app, this would be a chart) -->
+            <div class="h-64 bg-gray-700 bg-opacity-40 rounded-lg flex items-center justify-center">
+              <div class="text-center">
+                <div class="text-2xl font-medium text-gray-300">${stats.totalShares} Total Shares</div>
+                <div class="text-lg text-gray-400">${stats.confirmedSignups} Conversions (${stats.totalShares > 0 ? ((stats.confirmedSignups / stats.totalShares) * 100).toFixed(1) : '0'}%)</div>
+                <div class="mt-4">
+                  <div class="h-2 w-64 bg-gray-600 rounded-full overflow-hidden">
+                    <div class="h-full bg-gradient-to-r from-blue-500 to-purple-600" style="width: ${stats.totalShares > 0 ? ((stats.confirmedSignups / stats.totalShares) * 100) : 0}%"></div>
+                  </div>
                 </div>
               </div>
             </div>
-
-            <!-- right — activity -->
-            <div class="card">
-              <h2 class="text-3xl font-semibold text-white mb-8">Sales Activity</h2>
-              <div style="display: flex; flex-direction: column; gap: 20px;">
-                ${stats.totalShares ? `
-                  <div class="activity-item blue">
-                    <div class="flex items-center gap-4">
-                      <span class="text-blue-400 text-2xl">🔗</span>
-                      <span class="text-gray-200 font-medium text-lg">Link shared ${stats.totalShares.toLocaleString()} times</span>
-                    </div>
-                  </div>
-                ` : ''}
-                ${stats.pendingSignups ? `
-                  <div class="activity-item amber">
-                    <div class="flex items-center gap-4">
-                      <span class="text-amber-400 text-2xl">⏰</span>
-                      <span class="text-gray-200 font-medium text-lg">${stats.pendingSignups} signup${stats.pendingSignups !== 1 ? 's' : ''} pending 3-month validation</span>
-                    </div>
-                  </div>
-                ` : ''}
-                ${stats.confirmedSignups ? `
-                  <div class="activity-item green">
-                    <div class="flex items-center gap-4">
-                      <span class="text-green-400 text-2xl">💰</span>
-                      <span class="text-gray-200 font-medium text-lg">$${stats.totalEarnings.toLocaleString()} earned from ${stats.confirmedSignups} confirmed signup${stats.confirmedSignups !== 1 ? 's' : ''}</span>
-                    </div>
-                  </div>
-                ` : ''}
-
-                ${!stats.totalShares ? `
-                  <div class="empty-state">
-                    <span class="icon">🎯</span>
-                    <p class="text-gray-400 text-xl font-medium mb-3">Ready to start earning?</p>
-                    <p class="text-gray-500 text-lg">Copy your sales link and start sharing!</p>
-                  </div>
-                ` : ''}
-              </div>
-            </div>
-
+          </div>
+          
+          <!-- Recent activity -->
+          <div class="mt-10 p-8 bg-gray-800 bg-opacity-50 rounded-xl">
+            <h3 class="text-xl font-bold mb-6">Recent Activity</h3>
+            
+            <!-- Activity list -->
+            <div class="space-y-6">
+              <!-- Activity item (dynamically generated in a real app) -->
+              <div class="flex items-start gap-4">
+                <div class="rounded-full w-10 h-10 bg-green-600 bg-opacity-20 flex items-center justify-center flex-shrink-0">
+                  <svg class="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                  </svg>
+                </div>
+                <div>
+                  <div class="font-medium">New signup confirmed</div>
+                  <div class="text-sm text-gray-400 mt-1">Commission: $${payoutPerSignup} - 1 hour ago</div>
+                </div>
             <!-- bottom — progress to goal -->
             <div class="card" style="grid-column: 1 / -1;">
               <div class="flex items-center justify-between mb-8">
@@ -965,10 +1027,66 @@
       renderNotifications();
     }
 
-    // Initialize the app
+    // Initialize Firebase on page load
+    window.addEventListener('DOMContentLoaded', async () => {
+      try {
+        // Import the Firebase configuration if available
+        if (typeof firebaseConfig !== 'undefined') {
+          // Import Firebase SDK modules
+          await Promise.all([
+            import('https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js').then(module => {
+              window.firebase = window.firebase || {};
+              window.firebase.app = module;
+            }),
+            import('https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js').then(module => {
+              window.firebase = window.firebase || {};
+              window.firebase.authModule = module;
+            }),
+            import('https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js').then(module => {
+              window.firebase = window.firebase || {};
+              window.firebase.firestoreModule = module;
+            })
+          ]);
+          
+          // Initialize Firebase
+          try {
+            const app = window.firebase.app.initializeApp(firebaseConfig);
+            window.firebase.auth = window.firebase.authModule.getAuth(app);
+            window.firebase.db = window.firebase.firestoreModule.getFirestore(app);
+            window.firebase.initialized = true;
+            
+            // Make Firebase functions available in the global scope
+            window.onAuthStateChanged = window.firebase.authModule.onAuthStateChanged;
+            window.createUserWithEmailAndPassword = window.firebase.authModule.createUserWithEmailAndPassword;
+            window.signInWithEmailAndPassword = window.firebase.authModule.signInWithEmailAndPassword;
+            window.signOut = window.firebase.authModule.signOut;
+            window.doc = window.firebase.firestoreModule.doc;
+            window.getDoc = window.firebase.firestoreModule.getDoc;
+            window.setDoc = window.firebase.firestoreModule.setDoc;
+            window.updateDoc = window.firebase.firestoreModule.updateDoc;
+            window.increment = window.firebase.firestoreModule.increment;
+            window.serverTimestamp = window.firebase.firestoreModule.serverTimestamp;
+            
+            console.log('Firebase initialized successfully');
+          } catch (error) {
+            console.error('Error initializing Firebase:', error);
+            window.firebase.initialized = false;
+          }
+        } else {
+          console.warn('Firebase config not found, running in mock mode');
+          window.firebase = { initialized: false };
+        }
+      } catch (error) {
+        console.error('Error loading Firebase:', error);
+        window.firebase = { initialized: false };
+      }
+      
+      // Check if user is already logged in
+      checkAuthState();
+    });
+    
+    // Initial render
     render();
   </script>
 </body>
 </html>
-
-// 
